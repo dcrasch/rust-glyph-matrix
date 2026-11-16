@@ -1,0 +1,9 @@
+[package]
+name = "rust-glyph-matrix-desktop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rust-glyph-matrix = { path = ".." }
+env_logger = "0.11"
