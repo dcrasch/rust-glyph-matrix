@@ -93,3 +93,4 @@ The SDK groups A1+A2 into a single `buildChannelA()` call and C1 ring + C dots i
 - Enable SDK debug mode on-device: `adb shell settings put global nt_glyph_interface_debug_enable 1`
 # rust-glyph-matrix
 # rust-glyph-matrix
+# rust-glyph-matrix
