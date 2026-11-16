@@ -91,3 +91,4 @@ The SDK groups A1+A2 into a single `buildChannelA()` call and C1 ring + C dots i
 - Only **foreground** apps can control Glyphs.
 - The `NothingKey = "test"` value in the manifest works for debug builds. For production, register at the Nothing developer portal.
 - Enable SDK debug mode on-device: `adb shell settings put global nt_glyph_interface_debug_enable 1`
+# rust-glyph-matrix
