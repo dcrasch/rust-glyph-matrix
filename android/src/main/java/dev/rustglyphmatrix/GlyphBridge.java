@@ -14,14 +14,18 @@ import com.nothing.ketchum.GlyphManager;
  * Thin wrapper around the Nothing Glyph SDK that exposes a simple integer-mask
  * API callable from Rust via JNI.
  *
- * Zone bitmask (matches Zone::ALL order in Rust):
- *   bit 0 — A1 / A2  (Zone A, both rects — SDK groups them)
- *   bit 1 — A2       (grouped with A1 above in SDK)
- *   bit 2 — B1       (camera ring outer)
- *   bit 3 — C1 ring  (16-segment ring)
- *   bit 4 — C small  (C2–C6, same buildChannelC call)
- *   bit 5 — E1       (diagonal bar)
- *   bit 6 — D1 strip (progress strip)
+ * Mask bit i (0-based) selects glyphId i + 1 from the Nothing Phone (2) glyphId table:
+ *   bit 0  — 1  Camera top
+ *   bit 1  — 2  Camera bottom
+ *   bit 2  — 3  Diagonal
+ *   bit 3  — 4  Battery top right (4.1–4.16)
+ *   bit 4  — 5  Battery top left
+ *   bit 5  — 6  Battery top vertical (left)
+ *   bit 6  — 7  Battery bottom left
+ *   bit 7  — 8  Battery bottom right
+ *   bit 8  — 9  Battery bottom vertical (right)
+ *   bit 9  — 10 USB line (10.1–10.8)
+ *   bit 10 — 11 USB dot
  */
 public class GlyphBridge {
     private static final String TAG = "GlyphBridge";
@@ -67,33 +71,40 @@ public class GlyphBridge {
     // Public API (called from Rust via JNI)
     // -----------------------------------------------------------------------
 
-    /** Toggle the zones described by the bitmask on or off. */
+    /** Toggle the glyphs described by the bitmask on or off. */
     public void toggle(int mask) {
         if (!mSessionOpen) return;
         GlyphFrame frame = buildFrame(mask);
         if (frame != null) mGM.toggle(frame);
     }
 
-    /** Start a breathing animation on the zones described by the bitmask. */
+    /** Start a breathing animation on the glyphs described by the bitmask. */
     public void animate(int mask) {
         if (!mSessionOpen) return;
         GlyphFrame.Builder b = mGM.getGlyphFrameBuilder();
-        b = applyZones(b, mask);
+        b = applyGlyphs(b, mask);
         GlyphFrame frame = b.buildPeriod(1500).buildCycles(0).buildInterval(50).build();
         mGM.animate(frame);
     }
 
     /**
-     * Display a progress value (0–100) on the D1/C1 strip.
-     * The mask selects which other zones are on alongside the progress bar.
+     * Light the first segments of glyph 4 (16 segments) and glyph 10 (8 segments)
+     * in proportion to progress (0–100). Other glyphs in the mask are lit as usual.
      */
     public void setProgress(int mask, int progress) {
         if (!mSessionOpen) return;
-        try {
-            GlyphFrame frame = buildFrame(mask);
-            if (frame != null) mGM.displayProgress(frame, progress);
-        } catch (GlyphException e) {
-            Log.e(TAG, "setProgress: " + e.getMessage());
+        int p = Math.max(0, Math.min(100, progress));
+        int ring = (p * GLYPH_CHANNELS[3].length + 50) / 100;
+        int strip = (p * GLYPH_CHANNELS[9].length + 50) / 100;
+
+        GlyphFrame.Builder b = applyGlyphs(mGM.getGlyphFrameBuilder(), mask & ~PROGRESS_MASK);
+        b = fillSegments(b, GLYPH_CHANNELS[3], ring);
+        b = fillSegments(b, GLYPH_CHANNELS[9], strip);
+
+        if ((mask & ~PROGRESS_MASK) == 0 && ring == 0 && strip == 0) {
+            mGM.turnOff();
+        } else {
+            mGM.toggle(b.build());
         }
     }
 
@@ -118,32 +129,54 @@ public class GlyphBridge {
     // Helpers
     // -----------------------------------------------------------------------
 
-    /** Build a GlyphFrame from the zone bitmask. Returns null if no zone selected. */
+    /** Build a GlyphFrame from the glyph bitmask. Returns null if no glyph selected. */
     private GlyphFrame buildFrame(int mask) {
         if (mask == 0) return null;
         GlyphFrame.Builder b = mGM.getGlyphFrameBuilder();
-        b = applyZones(b, mask);
+        b = applyGlyphs(b, mask);
         return b.build();
     }
 
     /**
-     * Apply zone bits to the frame builder.
-     *
-     * Bit mapping (matches Zone::ALL in Rust):
-     *   0 → A (bit covers A1; SDK buildChannelA activates both A1 and A2)
-     *   1 → A (A2, same SDK call — activating bit 1 alone also calls buildChannelA)
-     *   2 → B
-     *   3 → C (C1 ring; buildChannelC activates C1_1..C1_16 + C2..C6)
-     *   4 → C (C small; same buildChannelC)
-     *   5 → E
-     *   6 → D (D1 strip)
+     * SDK channel indexes for each glyphId, indexed by bit. The SDK's channel
+     * names don't match the physical layout for glyphs 3 and 11: channel 24
+     * (named E1) lights the USB dot, and channel 2 (named B1) lights the diagonal.
      */
-    private GlyphFrame.Builder applyZones(GlyphFrame.Builder b, int mask) {
-        if ((mask & 0b0000011) != 0) b = b.buildChannelA();
-        if ((mask & 0b0000100) != 0) b = b.buildChannelB();
-        if ((mask & 0b0011000) != 0) b = b.buildChannelC();
-        if ((mask & 0b0100000) != 0) b = b.buildChannelE();
-        if ((mask & 0b1000000) != 0) b = b.buildChannelD();
+    private static final int[][] GLYPH_CHANNELS = {
+        {0},                                              // 1  Camera top
+        {1},                                              // 2  Camera bottom
+        {2},                                              // 3  Diagonal
+        {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}, // 4 Battery top right
+        {19},                                             // 5  Battery top left
+        {20},                                             // 6  Battery top vertical (left)
+        {21},                                             // 7  Battery bottom left
+        {22},                                             // 8  Battery bottom right
+        {23},                                             // 9  Battery bottom vertical (right)
+        {25, 26, 27, 28, 29, 30, 31, 32},                 // 10 USB line
+        {24},                                             // 11 USB dot
+    };
+
+    private static final int MAX_BRIGHTNESS = 4096;
+
+    /** Bits for glyph 4 (ring) and glyph 10 (strip), which the progress slider drives. */
+    private static final int PROGRESS_MASK = (1 << 3) | (1 << 9);
+
+    /** Apply glyph bits to the frame builder, lighting each selected glyph's channels. */
+    private GlyphFrame.Builder applyGlyphs(GlyphFrame.Builder b, int mask) {
+        for (int bit = 0; bit < GLYPH_CHANNELS.length; bit++) {
+            if ((mask & (1 << bit)) == 0) continue;
+            for (int channel : GLYPH_CHANNELS[bit]) {
+                b = b.buildChannel(channel, MAX_BRIGHTNESS);
+            }
+        }
+        return b;
+    }
+
+    /** Light the first `count` channels of a segmented glyph. */
+    private GlyphFrame.Builder fillSegments(GlyphFrame.Builder b, int[] channels, int count) {
+        for (int i = 0; i < count && i < channels.length; i++) {
+            b = b.buildChannel(channels[i], MAX_BRIGHTNESS);
+        }
         return b;
     }
 }
