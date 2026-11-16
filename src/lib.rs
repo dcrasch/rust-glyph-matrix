@@ -6,6 +6,9 @@
 
 pub use eframe;
 
+#[cfg(target_os = "android")]
+pub mod glyph;
+
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -56,22 +59,6 @@ const GLYPH_PNGS: [&[u8]; GLYPH_COUNT] = [
     include_bytes!("../assets/glyph_11.png"),
 ];
 
-fn glyph_source(i: usize) -> egui::ImageSource<'static> {
-    match i {
-        0 => egui::include_image!("../assets/glyph_1.png"),
-        1 => egui::include_image!("../assets/glyph_2.png"),
-        2 => egui::include_image!("../assets/glyph_3.png"),
-        3 => egui::include_image!("../assets/glyph_4.png"),
-        4 => egui::include_image!("../assets/glyph_5.png"),
-        5 => egui::include_image!("../assets/glyph_6.png"),
-        6 => egui::include_image!("../assets/glyph_7.png"),
-        7 => egui::include_image!("../assets/glyph_8.png"),
-        8 => egui::include_image!("../assets/glyph_9.png"),
-        9 => egui::include_image!("../assets/glyph_10.png"),
-        _ => egui::include_image!("../assets/glyph_11.png"),
-    }
-}
-
 pub struct GlyphApp {
     /// Which glyphs are currently switched on, indexed by glyphId - 1.
     glyphs: [bool; GLYPH_COUNT],
@@ -93,7 +80,7 @@ pub struct GlyphApp {
     demo_since: Instant,
     /// Platform-specific Glyph handle (None on desktop).
     #[cfg(target_os = "android")]
-    glyph: glyph::GlyphHandle,
+    glyph: glyph::GlyphController,
 }
 
 impl GlyphApp {
@@ -101,7 +88,7 @@ impl GlyphApp {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         #[cfg(target_os = "android")]
-        let glyph = glyph::GlyphHandle::init();
+        let glyph = glyph::GlyphController::new().expect("GlyphController::new failed");
 
         let masks: Vec<egui::ColorImage> = GLYPH_PNGS
             .iter()
@@ -158,7 +145,7 @@ impl GlyphApp {
             let result = if self.animate {
                 self.glyph.animate(&self.glyphs)
             } else {
-                self.glyph.toggle(&self.glyphs)
+                self.glyph.show(&self.glyphs)
             };
             self.status = match result {
                 Ok(()) => "OK".into(),
@@ -167,10 +154,7 @@ impl GlyphApp {
         }
         #[cfg(not(target_os = "android"))]
         {
-            self.status = format!(
-                "Desktop: glyphs {:?} animate={}",
-                self.glyphs, self.animate
-            );
+            self.status = format!("Desktop: glyphs {:?} animate={}", self.glyphs, self.animate);
         }
     }
 
@@ -267,15 +251,19 @@ impl eframe::App for GlyphApp {
             let mut hovered = None;
             ui.vertical_centered(|ui| {
                 let (rect, response) = ui.allocate_exact_size(phone_size, egui::Sense::click());
-                ui.painter().rect_filled(rect, 44.0 * rect.width() / 182.0, PHONE_BODY);
+                ui.painter()
+                    .rect_filled(rect, 44.0 * rect.width() / 182.0, PHONE_BODY);
                 Image::new(egui::include_image!("../assets/phone_back.svg")).paint_at(ui, rect);
                 for (i, &on) in self.glyphs.iter().enumerate() {
                     if on {
-                        Image::new(glyph_source(i)).paint_at(ui, rect);
+                        Image::from_bytes(format!("bytes://glyph_{}.png", i + 1), GLYPH_PNGS[i])
+                            .paint_at(ui, rect);
                     }
                 }
 
-                hovered = response.hover_pos().and_then(|pos| self.glyph_at(rect, pos));
+                hovered = response
+                    .hover_pos()
+                    .and_then(|pos| self.glyph_at(rect, pos));
                 let clicked_glyph = response
                     .interact_pointer_pos()
                     .filter(|_| response.clicked())
@@ -383,231 +371,5 @@ pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
         Box::new(|cc| Ok(Box::new(GlyphApp::new(cc)))),
     ) {
         log::error!("eframe error: {err}");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Android Glyph JNI bridge
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "android")]
-mod glyph {
-    use jni::objects::{JObject, JValue};
-    use jni::refs::Global;
-    use ndk_context::android_context;
-
-    use super::GLYPH_COUNT;
-
-    pub struct GlyphHandle {
-        bridge: Global<JObject<'static>>,
-    }
-
-    // SAFETY: the Global reference is valid across threads; JNI access is
-    // serialized by attaching each calling thread before use.
-    unsafe impl Send for GlyphHandle {}
-    unsafe impl Sync for GlyphHandle {}
-
-    impl GlyphHandle {
-        pub fn init() -> Self {
-            let ctx = android_context();
-            // SAFETY: the JavaVM pointer is valid for the lifetime of the process.
-            let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
-            let bridge_ref = vm
-                .attach_current_thread(|env| {
-                    let activity =
-                        unsafe { JObject::from_raw(env, ctx.context().cast()) };
-
-                    // Load our classes.dex (containing GlyphBridge + Glyph SDK)
-                    // via DexClassLoader, then call GlyphBridge.init via
-                    // reflection so the class is resolved from our loader.
-                    let bridge = load_dex_and_init_bridge(env, &activity)?;
-                    env.new_global_ref(bridge)
-                })
-                .expect("GlyphBridge.init failed");
-
-            Self { bridge: bridge_ref }
-        }
-
-        pub fn toggle(&self, glyphs: &[bool; GLYPH_COUNT]) -> Result<(), String> {
-            let mask = glyphs_to_mask(glyphs);
-            self.call_int_void(jni::jni_str!("toggle"), mask)
-        }
-
-        pub fn animate(&self, glyphs: &[bool; GLYPH_COUNT]) -> Result<(), String> {
-            let mask = glyphs_to_mask(glyphs);
-            self.call_int_void(jni::jni_str!("animate"), mask)
-        }
-
-        pub fn set_progress(&self, glyphs: &[bool; GLYPH_COUNT], progress: i32) -> Result<(), String> {
-            let mask = glyphs_to_mask(glyphs);
-            self.with_vm(|env| {
-                env.call_method(
-                    self.bridge.as_obj(),
-                    jni::jni_str!("setProgress"),
-                    jni::jni_sig!((int, int) -> void),
-                    &[JValue::Int(mask), JValue::Int(progress)],
-                )?;
-                Ok(())
-            })
-        }
-
-        pub fn turn_off(&self) -> Result<(), String> {
-            self.with_vm(|env| {
-                env.call_method(
-                    self.bridge.as_obj(),
-                    jni::jni_str!("turnOff"),
-                    jni::jni_sig!(() -> void),
-                    &[],
-                )?;
-                Ok(())
-            })
-        }
-
-        fn call_int_void(
-            &self,
-            name: &jni::strings::JNIStr,
-            arg: i32,
-        ) -> Result<(), String> {
-            self.with_vm(|env| {
-                env.call_method(
-                    self.bridge.as_obj(),
-                    name,
-                    jni::jni_sig!((int) -> void),
-                    &[JValue::Int(arg)],
-                )?;
-                Ok(())
-            })
-        }
-
-        fn with_vm<F>(&self, f: F) -> Result<(), String>
-        where
-            F: for<'e> FnOnce(&mut jni::Env<'e>) -> Result<(), jni::errors::Error>,
-        {
-            let ctx = android_context();
-            let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
-            vm.attach_current_thread(f).map_err(|e| e.to_string())
-        }
-    }
-
-    impl Drop for GlyphHandle {
-        fn drop(&mut self) {
-            let _ = self.with_vm(|env| {
-                env.call_method(
-                    self.bridge.as_obj(),
-                    jni::jni_str!("destroy"),
-                    jni::jni_sig!(() -> void),
-                    &[],
-                )?;
-                Ok(())
-            });
-        }
-    }
-
-    /// Loads `classes.dex` from the app's own APK via `DexClassLoader`, then
-    /// calls `GlyphBridge.init(context)` via reflection so the class is
-    /// resolved through our custom loader (not the system class loader, which
-    /// does not include our dex because NativeActivity sets hasCode=false).
-    fn load_dex_and_init_bridge<'e>(
-        env: &mut jni::Env<'e>,
-        context: &JObject<'_>,
-    ) -> Result<JObject<'e>, jni::errors::Error> {
-        // context.getPackageCodePath() → "/data/app/.../base.apk"
-        let apk_path = env
-            .call_method(
-                context,
-                jni::jni_str!("getPackageCodePath"),
-                jni::jni_sig!(() -> java.lang.String),
-                &[],
-            )?
-            .l()?;
-
-        // context.getCacheDir().getAbsolutePath() → writable dex opt dir
-        let cache_dir_file = env
-            .call_method(
-                context,
-                jni::jni_str!("getCacheDir"),
-                jni::jni_sig!(() -> java.io.File),
-                &[],
-            )?
-            .l()?;
-        let cache_path = env
-            .call_method(
-                &cache_dir_file,
-                jni::jni_str!("getAbsolutePath"),
-                jni::jni_sig!(() -> java.lang.String),
-                &[],
-            )?
-            .l()?;
-
-        // parent = context.getClassLoader()
-        let parent_loader = env
-            .call_method(
-                context,
-                jni::jni_str!("getClassLoader"),
-                jni::jni_sig!(() -> java.lang.ClassLoader),
-                &[],
-            )?
-            .l()?;
-
-        // new DexClassLoader(apkPath, cacheDir, null, parent)
-        let dcl_cls = env.find_class(jni::jni_str!("dalvik/system/DexClassLoader"))?;
-        let null = JObject::null();
-        let loader = env.new_object(
-            &dcl_cls,
-            jni::jni_sig!(
-                (java.lang.String, java.lang.String, java.lang.String, java.lang.ClassLoader)
-            ),
-            &[
-                JValue::Object(&apk_path),
-                JValue::Object(&cache_path),
-                JValue::Object(&null),
-                JValue::Object(&parent_loader),
-            ],
-        )?;
-        log::info!("DexClassLoader created from APK");
-
-        // loader.loadClass("dev.rustglyphmatrix.GlyphBridge")
-        let class_name = env.new_string("dev.rustglyphmatrix.GlyphBridge")?;
-        let bridge_cls = env
-            .call_method(
-                &loader,
-                jni::jni_str!("loadClass"),
-                jni::jni_sig!((java.lang.String) -> java.lang.Class),
-                &[JValue::Object(&class_name)],
-            )?
-            .l()?;
-        log::info!("GlyphBridge class loaded");
-
-        // Use reflection: bridge_cls.getMethod("init", Context.class).invoke(null, context)
-        // Easier: call the static method via env using the loaded class object as JClass.
-        // JNI lets us call static methods on a jclass obtained from loadClass.
-        // SAFETY: bridge_cls is a java.lang.Class object returned by loadClass.
-        let bridge_jclass: jni::objects::JClass<'_> = unsafe {
-            jni::objects::JClass::from_raw(env, bridge_cls.as_raw())
-        };
-        let bridge = env
-            .call_static_method(
-                &bridge_jclass,
-                jni::jni_str!("init"),
-                jni::jni_sig!(
-                    type_map = { GlyphBridge => "dev.rustglyphmatrix.GlyphBridge" },
-                    (android.content.Context) -> GlyphBridge
-                ),
-                &[JValue::Object(context)],
-            )?
-            .l()?;
-        log::info!("GlyphBridge.init succeeded");
-        Ok(bridge)
-    }
-
-    /// Packs the glyph flags into a bitmask: bit i is glyphId i + 1.
-    fn glyphs_to_mask(glyphs: &[bool; GLYPH_COUNT]) -> i32 {
-        let mut mask: i32 = 0;
-        for (i, &on) in glyphs.iter().enumerate() {
-            if on {
-                mask |= 1 << i;
-            }
-        }
-        mask
     }
 }

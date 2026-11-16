@@ -20,10 +20,12 @@ desktop:
     cargo run -p rust-glyph-matrix-desktop
 
 # Build the debug APK and inject the Glyph dex.
-build: _build_apk _inject_dex_debug
+build: _build_apk
+    just _inject_dex {{apk_debug}}
 
 # Build a release APK and inject the Glyph dex.
-build-release: _build_apk_release _inject_dex_release
+build-release: _build_apk_release
+    just _inject_dex {{apk_release}}
 
 # Build, install on the connected phone, and stream logs.
 run: build _install_debug _launch _logs
@@ -34,11 +36,10 @@ run-no-logcat: build _install_debug _launch
 # Install an already-built debug APK.
 install: _install_debug
 
-# Stream this app's logcat.
+# Clear logcat and stream this app's logs.
 logs:
     adb logcat -c
-    adb logcat -s rust-glyph-matrix:V AndroidRuntime:E GlyphBridge:V
-
+    just _logs
 # Force-stop the app.
 stop:
     adb shell am force-stop {{app_package}}
@@ -64,8 +65,9 @@ _build_apk:
 _build_apk_release:
     cargo apk build --release
 
-# Locate the classes.dex produced by build.rs and inject it into the APK.
-_inject_dex_debug:
+# Inject classes.dex into an APK, re-align it, and re-sign it with the debug key.
+# Usage: just _inject_dex <apk>
+_inject_dex apk:
     #!/usr/bin/env bash
     set -euo pipefail
     DEX=$(find target -name "classes.dex" -path "*/dex/classes.dex" | head -1)
@@ -73,37 +75,17 @@ _inject_dex_debug:
         echo "WARNING: classes.dex not found — Glyph SDK will be absent from APK"
         exit 0
     fi
-    python3 scripts/inject_dex.py "$DEX" "{{apk_debug}}"
+    python3 scripts/inject_dex.py "$DEX" "{{apk}}"
     BUILD_TOOLS="${ANDROID_HOME}/build-tools"
     ZIPALIGN=$(ls "$BUILD_TOOLS"/*/zipalign 2>/dev/null | sort -V | tail -1)
     APKSIGNER=$(ls "$BUILD_TOOLS"/*/apksigner 2>/dev/null | sort -V | tail -1)
     DEBUG_KS="${HOME}/.android/debug.keystore"
-    "$ZIPALIGN" -f 4 "{{apk_debug}}" "{{apk_debug}}.aligned"
-    mv "{{apk_debug}}.aligned" "{{apk_debug}}"
+    "$ZIPALIGN" -f 4 "{{apk}}" "{{apk}}.aligned"
+    mv "{{apk}}.aligned" "{{apk}}"
     "$APKSIGNER" sign --ks "$DEBUG_KS" --ks-pass pass:android \
         --key-pass pass:android --ks-key-alias androiddebugkey \
-        "{{apk_debug}}"
-    echo "APK ready: {{apk_debug}}"
-
-_inject_dex_release:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    DEX=$(find target -name "classes.dex" -path "*/dex/classes.dex" | head -1)
-    if [ -z "$DEX" ]; then
-        echo "WARNING: classes.dex not found — Glyph SDK will be absent from APK"
-        exit 0
-    fi
-    python3 scripts/inject_dex.py "$DEX" "{{apk_release}}"
-    BUILD_TOOLS="${ANDROID_HOME}/build-tools"
-    ZIPALIGN=$(ls "$BUILD_TOOLS"/*/zipalign 2>/dev/null | sort -V | tail -1)
-    APKSIGNER=$(ls "$BUILD_TOOLS"/*/apksigner 2>/dev/null | sort -V | tail -1)
-    DEBUG_KS="${HOME}/.android/debug.keystore"
-    "$ZIPALIGN" -f 4 "{{apk_release}}" "{{apk_release}}.aligned"
-    mv "{{apk_release}}.aligned" "{{apk_release}}"
-    "$APKSIGNER" sign --ks "$DEBUG_KS" --ks-pass pass:android \
-        --key-pass pass:android --ks-key-alias androiddebugkey \
-        "{{apk_release}}"
-    echo "APK ready: {{apk_release}}"
+        "{{apk}}"
+    echo "APK ready: {{apk}}"
 
 _install_debug:
     adb install -r {{apk_debug}}

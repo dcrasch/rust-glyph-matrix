@@ -1,46 +1,74 @@
 # rust-glyph-matrix
 
-An egui Android app for controlling the back LED (Glyph) lights on the **Nothing Phone (2)**.
+Control the back Glyph LEDs on the **Nothing Phone (2)** from Rust.
 
-Built with Rust + eframe/egui, targeting Android via `cargo-apk`. The same codebase also runs as a desktop binary for fast UI iteration.
+The app is an egui interface on Android, built with `cargo-apk`. It also
+runs as a desktop binary, which shows the same UI without touching the LEDs,
+for quick layout work.
 
 ## Features
 
-- Toggle individual Glyph zones (A1, A2, B1, C1 ring, C2–C6 dots, E1 bar, D1 strip)
-- Progress bar display on the D1/C1 LED strip
-- Breathing animation mode
-- All Off button
+- Toggle individual Glyph zones by clicking them on the phone diagram
+- Progress fill on the camera ring (glyph 4) and the USB strip (glyph 10)
+- Breathing animation
+- Demo mode that steps through every zone
+- All Off
+
+## Using the library
+
+The Glyph API is in `src/glyph.rs` as `GlyphController`. It's a standalone
+module, so other apps can depend on this crate and use it directly:
+
+```rust
+use rust_glyph_matrix::{GLYPH_COUNT, glyph::GlyphController};
+
+let glyphs = GlyphController::new()?;
+let mut flags = [false; GLYPH_COUNT];
+flags[0] = true;               // glyphId 1, camera top
+glyphs.show(&flags)?;
+glyphs.set_progress(&flags, 40)?;
+glyphs.turn_off()?;
+```
+
+Run `cargo doc --no-deps --target aarch64-linux-android --open` for the full
+API reference.
+
+Glyph index `i` is glyphId `i + 1`. See the zone table below.
 
 ## Project layout
 
 ```
 rust-glyph-matrix/
-├── Cargo.toml             # workspace + Android library package
-├── build.rs               # extracts AAR, compiles GlyphBridge.java, runs d8
-├── src/lib.rs             # egui app + JNI bridge
-├── desktop/               # desktop launcher
-│   ├── Cargo.toml
-│   └── src/main.rs
-├── android/
-│   └── src/main/java/dev/rustglyphmatrix/
-│       └── GlyphBridge.java   # Java wrapper for the Glyph SDK
+├── Cargo.toml                # workspace root + Android package metadata
+├── build.rs                  # compiles GlyphBridge.java and dexes it (Android only)
+├── src/
+│   ├── lib.rs                # egui app
+│   └── glyph.rs              # GlyphController: JNI wrapper around the Glyph SDK
+├── desktop/                  # desktop launcher
+├── android/src/main/java/dev/rustglyphmatrix/
+│   └── GlyphBridge.java      # Java side: integer-mask API over the Glyph SDK
+├── assets/
+│   ├── phone_back.svg        # phone diagram with all zones
+│   └── glyph_<id>.png        # lit overlay per glyphId (generated)
 ├── libs/
 │   └── glyph-matrix-sdk-2.0.aar  # Nothing Glyph SDK
+├── scripts/
+│   ├── render_phone_back.py  # regenerates assets/glyph_<id>.png from the SVG
+│   └── inject_dex.py         # adds classes.dex to a built APK
 └── justfile
 ```
 
 ## Requirements
 
-| Tool            | Version          |
-|-----------------|------------------|
-| Rust            | 1.85+            |
-| Android NDK     | 30.0.16248370    |
-| Android SDK     | API 35           |
-| Android build-tools | 36+          |
-| JDK             | 11+              |
-| `cargo-apk`     | 0.10             |
+| Tool                | Version        |
+|---------------------|----------------|
+| Rust                | 1.85+          |
+| Android NDK         | 30.0.16248370  |
+| Android SDK         | API 35         |
+| Android build-tools | 36+            |
+| JDK                 | 11+            |
+| `cargo-apk`         | 0.10           |
 
-Environment variables:
 ```sh
 export ANDROID_HOME="$HOME/Android/Sdk"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
@@ -49,49 +77,71 @@ export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
 ## Usage
 
 ```sh
-just setup            # install Rust Android targets + cargo-apk
-just desktop          # run desktop preview (no phone needed)
-just build            # build APK + inject Glyph SDK dex
-just run              # build, install, launch, follow logs
-just logs             # stream logcat from the app
-just stop             # force-stop on phone
-just uninstall        # remove from phone
+just setup            # install Rust Android target and cargo-apk
+just desktop          # run the desktop preview (no phone needed)
+just build            # build the debug APK and inject the Glyph dex
+just build-release    # same, for release
+just run              # build, install, launch, and stream logs
+just run-no-logcat    # build, install, and launch
+just logs             # stream this app's logcat
+just stop             # force-stop the app on the phone
+just uninstall        # remove the app from the phone
+just doctor           # print environment info
 ```
+
+Set `GLYPH_DEMO=1` before `just desktop` to start in demo mode.
 
 ## How it works
 
-`cargo-apk` builds the Rust shared library and wraps it in an APK that uses Android's `NativeActivity`. It does not support Java/AAR dependencies natively.
+`cargo-apk` builds the Rust shared library and wraps it in an APK that uses
+Android's `NativeActivity`. It can't package Java or AAR dependencies, so the
+Java side is added in two steps.
 
-**`build.rs`** bridges the gap at build time:
-1. Extracts `classes.jar` from `libs/glyph-matrix-sdk-2.0.aar`
-2. Compiles `GlyphBridge.java` with `javac` (against `android.jar` and the SDK jar)
-3. Runs `d8` to merge everything into `classes.dex`
+1. **`build.rs`** runs during the Android build. It extracts `classes.jar`
+   from the Glyph AAR, compiles `GlyphBridge.java` with `javac`, and runs
+   `d8` to produce `classes.dex`.
+2. **`just build`** injects that `classes.dex` into the APK, re-aligns it,
+   and re-signs it.
 
-**`just build`** then injects that `classes.dex` into the generated APK, re-aligns, and re-signs it.
-
-At runtime, the Rust side calls `GlyphBridge.init(context)` via JNI to get a bridge object, then calls `toggle()`, `animate()`, `setProgress()`, and `turnOff()` on it. `GlyphBridge` wraps the Nothing `GlyphManager` and handles the async service-connection lifecycle.
+At runtime, `GlyphController::new()` loads `GlyphBridge` from the APK through
+`DexClassLoader`, because `NativeActivity` doesn't expose the app's classes
+to the default class loader. It then calls `GlyphBridge.init(context)`. The
+Java bridge connects to the Glyph service, and the Rust methods call
+`show`, `animate`, `setProgress`, and `turnOff` through JNI.
 
 ## Nothing Phone (2) Glyph zones
 
-| Zone     | LEDs                        | Bit |
-|----------|-----------------------------|-----|
-| A1       | Top-left rectangle          | 0   |
-| A2       | Top-right rectangle         | 1   |
-| B1       | Camera ring (outer)         | 2   |
-| C1 ring  | Camera ring (16 segments)   | 3   |
-| C2–C6    | Small dots                  | 4   |
-| E1       | Diagonal bar                | 5   |
-| D1 strip | Progress strip (8 segments) | 6   |
+Glyph index is the position in the Rust array (`glyphs[i]`). The bit is the
+position in the integer mask sent to `GlyphBridge`.
 
-The SDK groups A1+A2 into a single `buildChannelA()` call and C1 ring + C dots into `buildChannelC()`.
+| Index | glyphId | Bit | Zone                              | SDK channels |
+|-------|---------|-----|-----------------------------------|--------------|
+| 0     | 1       | 0   | Camera top                        | 0            |
+| 1     | 2       | 1   | Camera bottom                     | 1            |
+| 2     | 3       | 2   | Diagonal                          | 2            |
+| 3     | 4       | 3   | Battery top right: ring, 16 segs  | 3–18         |
+| 4     | 5       | 4   | Battery top left                  | 19           |
+| 5     | 6       | 5   | Battery top vertical (left)       | 20           |
+| 6     | 7       | 6   | Battery bottom left               | 21           |
+| 7     | 8       | 7   | Battery bottom right              | 22           |
+| 8     | 9       | 8   | Battery bottom vertical (right)   | 23           |
+| 9     | 10      | 9   | USB line: strip, 8 segs           | 25–32        |
+| 10    | 11      | 10  | USB dot                           | 24           |
+
+The SDK's channel names don't match the physical layout. For example, channel
+24 is labeled `E1` but lights the USB dot. `GlyphBridge.java` maps glyphs to
+channels, and the table above follows it.
+
+`set_progress` fills glyph 4 (ring) and glyph 10 (strip) in proportion to the
+value, and ignores their bits in the mask.
 
 ## Notes
 
 - The Glyph SDK only works on **Nothing devices running Android 14+**.
-- Only **foreground** apps can control Glyphs.
-- The `NothingKey = "test"` value in the manifest works for debug builds. For production, register at the Nothing developer portal.
-- Enable SDK debug mode on-device: `adb shell settings put global nt_glyph_interface_debug_enable 1`
-# rust-glyph-matrix
-# rust-glyph-matrix
-# rust-glyph-matrix
-# rust-glyph-matrix
+- Only the **foreground** app can control the Glyphs.
+- `NothingKey = "test"` in the manifest works for debug builds. For a
+  release build, register with the Nothing developer portal.
+- Turn on SDK debug logging on the device with
+  `adb shell settings put global nt_glyph_interface_debug_enable 1`.
+- Calls made before the Glyph service connects are ignored. Watch for
+  `Glyph session opened` in `just logs` before you test.

@@ -7,8 +7,8 @@
 //!   3. Runs `d8` to merge everything into `classes.dex` and places it in
 //!      `$OUT_DIR/dex/classes.dex`.
 //!
-//! cargo-apk does not inject a `classes.dex` automatically; a `justfile`
-//! target (`just inject-dex`) patches the APK after `cargo apk build`.
+//! cargo-apk does not inject a `classes.dex` automatically; `just build`
+//! patches the APK after `cargo apk build`.
 //!
 //! On non-Android targets the script is a no-op.
 
@@ -28,9 +28,7 @@ fn main() {
         return;
     }
 
-    let android_home = match env::var("ANDROID_HOME")
-        .or_else(|_| env::var("ANDROID_SDK_ROOT"))
-    {
+    let android_home = match env::var("ANDROID_HOME").or_else(|_| env::var("ANDROID_SDK_ROOT")) {
         Ok(h) => PathBuf::from(h),
         Err(_) => {
             println!("cargo:warning=ANDROID_HOME not set; skipping Java/dex compilation");
@@ -54,9 +52,7 @@ fn main() {
     // Locate the highest available android.jar.
     let android_jar = find_android_jar(&android_home);
     if !android_jar.exists() {
-        println!(
-            "cargo:warning=android.jar not found; skipping Java compilation"
-        );
+        println!("cargo:warning=android.jar not found; skipping Java compilation");
         return;
     }
 
@@ -74,8 +70,7 @@ fn main() {
     extract_classes_jar(&aar, &sdk_jar);
 
     // Compile GlyphBridge.java.
-    let java_src =
-        PathBuf::from("android/src/main/java/dev/rustglyphmatrix/GlyphBridge.java");
+    let java_src = PathBuf::from("android/src/main/java/dev/rustglyphmatrix/GlyphBridge.java");
     let javac_out = out_dir.join("javac");
     fs::create_dir_all(&javac_out).unwrap();
 
@@ -85,11 +80,7 @@ fn main() {
             "--release",
             "11",
             "-cp",
-            &format!(
-                "{}:{}",
-                android_jar.display(),
-                sdk_jar.display()
-            ),
+            &format!("{}:{}", android_jar.display(), sdk_jar.display()),
             "-d",
             javac_out.to_str().unwrap(),
             java_src.to_str().unwrap(),
@@ -135,12 +126,9 @@ fn main() {
         panic!("d8 failed — see output above");
     }
 
-    // Write the dex path so the justfile can find it.
-    let dex_path = dex_out.join("classes.dex");
-    println!("cargo:rustc-env=GLYPH_DEX_PATH={}", dex_path.display());
     println!(
         "cargo:warning=Glyph dex built at {}",
-        dex_path.display()
+        dex_out.join("classes.dex").display()
     );
 }
 
@@ -173,7 +161,9 @@ fn find_android_jar(android_home: &Path) -> PathBuf {
         .filter(|p| p.exists())
         .collect();
     jars.sort();
-    jars.into_iter().last().unwrap_or_else(|| dir.join("unknown").join("android.jar"))
+    jars.into_iter()
+        .last()
+        .unwrap_or_else(|| dir.join("unknown").join("android.jar"))
 }
 
 /// Recursively collect all `.class` files under `dir`.
@@ -184,7 +174,7 @@ fn collect_class_files(dir: &Path) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 out.extend(collect_class_files(&path));
-            } else if path.extension().map_or(false, |e| e == "class") {
+            } else if path.extension().is_some_and(|e| e == "class") {
                 out.push(path);
             }
         }

@@ -4,14 +4,12 @@
 Source: glyphtones.firu.dev's phone2.svg
   https://raw.githubusercontent.com/firu11/nothing-glyphtones/main/static/phones/phone2.svg
 
-The SVG contains the phone's 33 Glyph zones as individual <path> elements
+The SVG contains the phone's Glyph zones as individual <path> elements
 (indexed 0..24 plus two "gradient" multi-LED strips: 3-18 = 16-segment
-ring/arc, 25-32 = 8-segment USB line). The phone body itself is not in the
-SVG (glyphtones draws it with CSS), so we add a body rect behind it.
+ring/arc, 25-32 = 8-segment USB line).
 
-Outputs (all RGBA, transparent background):
-  assets/phone_back.png      base: body + every glyph at "off" brightness
-  assets/glyph_<id>.png      lit overlay for each glyphId (white on transparent)
+Output: assets/glyph_<id>.png, one lit overlay per glyphId (RGBA, transparent
+background). The app draws the phone body and phone_back.svg itself.
 
 SVG path ids match the glyphId table for Nothing Phone (2) in
 custom-nothing-glyph-tools (docs/4_First Composition/1b_glyphId Nothing Phone (2).md).
@@ -24,7 +22,6 @@ import xml.etree.ElementTree as ET
 SVG = os.path.join(os.path.dirname(__file__), "..", "assets", "phone_back.svg")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
 
-BASE_OPACITY = "0.32"   # "off" brightness of the reference base image
 LIT_OPACITY = "1.0"     # brightness of a lit zone overlay
 
 # (glyphId, SVG path ids) in glyphId table order.
@@ -42,8 +39,6 @@ GLYPHS = [
     ("11", "24"),       # USB Dot
 ]
 
-BODY_RECT = '    <rect x="3" y="3" width="176" height="376" rx="44" fill="#535150"/>\n'
-
 
 def render(svg_text: str, name: str) -> str:
     """Write svg_text to a temp file, rasterize to PNG via rsvg-convert."""
@@ -59,16 +54,8 @@ def render(svg_text: str, name: str) -> str:
     return png_path
 
 
-def set_attribute(element: ET.Element, attrs: dict) -> None:
-    for k, v in attrs.items():
-        element.set(k, v)
-
-
 def build_svg(lit_ids: set[str]) -> str:
-    """Return the SVG string with `lit_ids` bright and every other zone hidden.
-
-    If lit_ids is None, all zones are shown at BASE_OPACITY (the base image).
-    """
+    """Return the SVG with only the zones in `lit_ids` visible."""
     tree = ET.parse(SVG)
     root = tree.getroot()
 
@@ -84,48 +71,23 @@ def build_svg(lit_ids: set[str]) -> str:
             if first <= int(s.get("id", "grad-0").split("-")[1]) <= last
         ]
 
-    if lit_ids is None:
-        # Base image: every path/gradient stop at the off brightness.
-        for p in paths:
-            if p.get("opacity") is not None:
-                p.set("opacity", BASE_OPACITY)
-        for s in stops:
-            s.set("stop-opacity", BASE_OPACITY)
-    else:
-        for p in paths:
-            pid = p.get("id", "")
-            if p.get("opacity") is not None:
-                p.set("opacity", LIT_OPACITY if pid in lit_ids else "0")
-            else:
-                # Gradient path: control via its gradient's stops.
-                grad_id = p.get("style", "").partition("url(#")[2].partition(")")[0]
-                on = pid in lit_ids
-                for s in grad_stops.get(grad_id, []):
-                    s.set("stop-opacity", LIT_OPACITY if on else "0")
-        # Non-gradient stops already handled per-path above; clear any
-        # gradient whose path was not lit (defensive no-op handled above).
-        for s in stops:
-            # Stops already set only when their gradient path was processed.
-            pass
+    for p in paths:
+        pid = p.get("id", "")
+        if p.get("opacity") is not None:
+            p.set("opacity", LIT_OPACITY if pid in lit_ids else "0")
+        else:
+            # Gradient path: control via its gradient's stops.
+            grad_id = p.get("style", "").partition("url(#")[2].partition(")")[0]
+            on = pid in lit_ids
+            for s in grad_stops.get(grad_id, []):
+                s.set("stop-opacity", LIT_OPACITY if on else "0")
 
     ET.indent(root)
-    svg_text = ET.tostring(root, encoding="unicode")
-    if lit_ids is not None:
-        # Zone overlays must stay transparent outside the zone, or they cover the body and break hit-testing.
-        return svg_text
-    # Inject the body rectangle right after the opening <svg ...> tag.
-    tag_end = svg_text.index(">") + 1
-    return svg_text[:tag_end] + "\n" + BODY_RECT + svg_text[tag_end:]
+    return ET.tostring(root, encoding="unicode")
 
 
 def main() -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
-
-    # Base image
-    render(build_svg(None), "phone_back.png")
-    print("wrote assets/phone_back.png (728x1528)")
-
-    # Per-zone lit overlays
     for gid, svg_ids in GLYPHS:
         out = render(build_svg({svg_ids}), f"glyph_{gid}.png")
         print(f"wrote {out}  <- glyphId {gid} (svg {svg_ids})")
